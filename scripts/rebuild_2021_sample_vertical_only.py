@@ -142,9 +142,16 @@ def exact_number_box(page, number, prefer_x_min=None):
             if prefer_x_min is not None and x0 < prefer_x_min:
                 continue
             hits.append((x0, y0, x1, y1))
-    if not hits:
-        raise RuntimeError(f"Could not find printed number {number}")
-    return hits[0]
+    if hits:
+        return hits[0]
+    # Some gap numbers are not emitted as standalone words by the PDF text extractor.
+    # search_for still returns their exact printed rectangle.
+    rects = page.search_for(str(number))
+    rects = [r for r in rects if r.y0 < 770 and r.width < 30]
+    if rects:
+        r = rects[0]
+        return (r.x0, r.y0, r.x1, r.y1)
+    raise RuntimeError(f"Could not find printed number {number}")
 
 reading = download("reading")
 maths = download("maths")
