@@ -118,14 +118,43 @@ def mask_rect_on_crop(im, page_rect, crop_top, zoom=1.75, extra=4):
     d.rectangle((px0, py0, px1, py1), fill="white")
     return im
 
+
+def crop_and_mask(page, top, bottom, box, zoom=1.8, pad=10):
+    """Render full width, mask only a stale printed number, then trim vertically."""
+    top = max(0, top)
+    bottom = min(page.rect.height, bottom)
+    im = render(page, fitz.Rect(0, top, page.rect.width, bottom), zoom)
+    x0, y0, x1, y1 = box
+    d = ImageDraw.Draw(im)
+    d.rectangle((
+        max(0, int(x0 * zoom) - 6),
+        max(0, int((y0 - top) * zoom) - 6),
+        min(im.width, int(x1 * zoom) + 6),
+        min(im.height, int((y1 - top) * zoom) + 6),
+    ), fill="white")
+    return vertical_trim(im, pad)
+
+def exact_number_box(page, number, prefer_x_min=None):
+    hits = []
+    for w in page.get_text("words"):
+        x0, y0, x1, y1, text, *_ = w
+        if text == str(number) and y0 < 770:
+            if prefer_x_min is not None and x0 < prefer_x_min:
+                continue
+            hits.append((x0, y0, x1, y1))
+    if not hits:
+        raise RuntimeError(f"Could not find printed number {number}")
+    return hits[0]
+
 reading = download("reading")
 maths = download("maths")
 thinking = download("thinking")
 assets = {}
 
 # ---------- Reading Q1-8: same numbering and same original extracts ----------
-r_ms = markers(reading, 1, 38, 70)
-r_by_q = {m[0]: m for m in r_ms}
+r_basic = markers(reading, 1, 8, 70)
+r_poem = markers(reading, 17, 22, 70)
+r_by_q = {m[0]: m for m in (r_basic + r_poem)}
 q1 = r_by_q[1]
 assets["r_ctx_1"] = to_uri(crop(reading[2], 35, reading[2].rect.height - 48, 1.5, 10), 78)
 assets["r_ctx_2"] = to_uri(crop(reading[3], 30, q1[3] - 18, 1.5, 10), 78)
@@ -137,13 +166,15 @@ for q in range(1, 9):
 poem_page = find_page(reading, "The Fish")
 assets["r_ctx_3"] = to_uri(crop(reading[poem_page], 45, reading[poem_page].rect.height - 48, 1.5, 10), 78)
 
-r_17_22 = one_question_each(reading, 17, 22, 70, 1.75)
-for old_q, current_q in zip(range(9, 15), range(17, 23)):
-    # Remove only the obsolete printed number; never crop horizontally.
+poem_markers = r_poem
+for i, (old_q, current_q) in enumerate(zip(range(9, 15), range(17, 23))):
     m = r_by_q[current_q]
-    crop_top = m[3] - 15
-    im = r_17_22[current_q]
-    im = mask_rect_on_crop(im, (m[2], m[3], m[4], m[5]), crop_top, 1.75, 6)
+    page = reading[m[1]]
+    if i + 1 < len(poem_markers) and poem_markers[i + 1][1] == m[1]:
+        bottom = poem_markers[i + 1][3] - 8
+    else:
+        bottom = min(page.rect.height - 48, 775)
+    im = crop_and_mask(page, m[3] - 15, bottom, (m[2], m[3], m[4], m[5]), 1.75, 14)
     assets[f"r_q_{old_q}"] = to_uri(im, 82)
 
 # ---------- Reading old Q15-20 = current PT1 Octopus gaps Q23-28 ----------
@@ -171,15 +202,23 @@ else:
 assets["r_options_15_20"] = to_uri(crop(p, options_top, options_bottom, 1.65, 8), 80)
 
 for old_q, current_q in zip(range(15, 21), range(23, 29)):
-    m = r_by_q[current_q]
-    page = reading[m[1]]
-    # A narrow vertical band around the relevant gap line, full width horizontally.
-    # It is intentionally independent from every other gap.
-    top = m[3] - 20
-    bottom = m[5] + 35
-    im = crop(page, top, bottom, 1.8, 7)
-    # Hide current PT1's renumbered gap marker; app heading says Q15..Q20.
-    im = mask_rect_on_crop(im, (m[2], m[3], m[4], m[5]), top, 1.8, 6)
+    # Current PT1 has the same Octopus gap material numbered 23-28.
+    # Locate the exact printed gap number on the two Octopus pages.
+    page_candidates = [reading[oct_start], reading[oct_start + 1]]
+    found = None
+    found_page = None
+    for pg in page_candidates:
+        try:
+            found = exact_number_box(pg, current_q)
+            found_page = pg
+            break
+        except RuntimeError:
+            pass
+    if found is None:
+        raise RuntimeError(f"Octopus gap {current_q} not found")
+    top = found[1] - 20
+    bottom = found[3] + 38
+    im = crop_and_mask(found_page, top, bottom, found, 1.8, 8)
     assets[f"r_q_{old_q}"] = to_uri(im, 82)
 
 # ---------- Reading old Q21-30 = current PT1 Dreams Q29-38 ----------
@@ -211,8 +250,7 @@ for i, (current_q, box) in enumerate(ordered):
     next_y = ordered[i + 1][1][1] if i + 1 < len(ordered) else y0 + 42
     top = y0 - 11
     bottom = next_y - 4
-    im = crop(page, top, bottom, 1.8, 6)
-    im = mask_rect_on_crop(im, box, top, 1.8, 6)
+    im = crop_and_mask(page, top, bottom, box, 1.8, 7)
     assets[f"r_q_{old_q}"] = to_uri(im, 82)
 
 # ---------- Maths: 35 individually isolated questions ----------
