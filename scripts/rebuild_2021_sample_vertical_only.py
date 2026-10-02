@@ -10,9 +10,9 @@ OUT = ROOT / "2021-sample"
 OUT.mkdir(exist_ok=True)
 
 URLS = {
-    "reading": "https://education.nsw.gov.au/content/dam/main-education/schooling/parents-and-carers/choosing-a-school-setting/selective-high-schools-and-opportunity-classes-parents/documents/shs-practice-tests-2026-entry/PT1_SHS_reading_questions.pdf",
-    "maths": "https://education.nsw.gov.au/content/dam/main-education/schooling/parents-and-carers/choosing-a-school-setting/selective-high-schools-and-opportunity-classes-parents/documents/shs-practice-tests-2026-entry/PT1_SHS_maths_questions_Final.pdf",
-    "thinking": "https://education.nsw.gov.au/content/dam/main-education/schooling/parents-and-carers/choosing-a-school-setting/selective-high-schools-and-opportunity-classes-parents/documents/shs-practice-tests-2026-entry/PT1_SHS_thinking_skills_questions.pdf",
+    "reading": "https://bettereducation.com.au/resources/download/nsw/SelectiveHighSchoolPlacement/sample%20tests/2021/reading-sample-test-questions.pdf",
+    "maths": "https://bettereducation.com.au/resources/download/nsw/SelectiveHighSchoolPlacement/sample%20tests/2021/maths-sample-test-questions.pdf",
+    "thinking": "https://bettereducation.com.au/resources/download/nsw/SelectiveHighSchoolPlacement/sample%20tests/2021/thinking-sample-test-questions.pdf",
 }
 
 TMP = ROOT / ".tmp_sample_pdfs"
