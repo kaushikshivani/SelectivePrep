@@ -209,23 +209,34 @@ else:
 assets["r_options_15_20"] = to_uri(crop(p, options_top, options_bottom, 1.65, 8), 80)
 
 for old_q, current_q in zip(range(15, 21), range(23, 29)):
-    # Current PT1 has the same Octopus gap material numbered 23-28.
-    # Locate the exact printed gap number on the two Octopus pages.
-    page_candidates = [reading[oct_start], reading[oct_start + 1]]
-    found = None
+    # Find the paragraph containing the actual dotted gap, not the instruction
+    # "Questions 23-28" at the top of the section.
     found_page = None
-    for pg in page_candidates:
-        try:
-            found = exact_number_box(pg, current_q)
-            found_page = pg
+    gap_block = None
+    for pg in [reading[oct_start], reading[oct_start + 1]]:
+        for b in pg.get_text("blocks"):
+            txt = b[4]
+            if re.search(rf"\\b{current_q}\\s*[.…]", txt):
+                found_page = pg
+                gap_block = b
+                break
+        if gap_block is not None:
             break
-        except RuntimeError:
-            pass
-    if found is None:
-        raise RuntimeError(f"Octopus gap {current_q} not found")
-    top = found[1] - 20
-    bottom = found[3] + 38
-    im = crop_and_mask(found_page, top, bottom, found, 1.8, 8)
+    if gap_block is None:
+        raise RuntimeError(f"Actual Octopus gap {current_q} not found")
+    bx0, by0, bx1, by1 = gap_block[:4]
+    # Locate this question number specifically inside the matched paragraph.
+    number_rects = [
+        r for r in found_page.search_for(str(current_q))
+        if r.y0 >= by0 - 2 and r.y1 <= by1 + 2
+    ]
+    if not number_rects:
+        raise RuntimeError(f"Printed Octopus gap number {current_q} not found in paragraph")
+    nr = number_rects[0]
+    box = (nr.x0, nr.y0, nr.x1, nr.y1)
+    top = by0 - 7
+    bottom = by1 + 7
+    im = crop_and_mask(found_page, top, bottom, box, 1.8, 7)
     assets[f"r_q_{old_q}"] = to_uri(im, 82)
 
 # ---------- Reading old Q21-30 = current PT1 Dreams Q29-38 ----------
