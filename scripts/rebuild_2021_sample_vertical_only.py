@@ -208,35 +208,47 @@ else:
     options_top, options_bottom = 150, p.rect.height - 55
 assets["r_options_15_20"] = to_uri(crop(p, options_top, options_bottom, 1.65, 8), 80)
 
+octopus_patterns = {
+    23: "highly developed and curious creatures",
+    24: "shown to use tools",
+    25: "reported to be in decline",
+    26: "feeding them difficult and expensive",
+    27: "basic stock for breeding",
+    28: "eggs in captivity",
+}
 for old_q, current_q in zip(range(15, 21), range(23, 29)):
-    # Find the paragraph containing the actual dotted gap, not the instruction
-    # "Questions 23-28" at the top of the section.
+    # Locate the exact article paragraph by its unique surrounding text.
+    # This avoids mistaking the section heading "Questions 23-28" for a gap.
     found_page = None
     gap_block = None
+    pattern = octopus_patterns[current_q].lower()
     for pg in [reading[oct_start], reading[oct_start + 1]]:
         for b in pg.get_text("blocks"):
-            txt = b[4]
-            if re.search(rf"\\b{current_q}\\s*[.…]", txt):
+            txt = b[4].lower()
+            if pattern in txt:
                 found_page = pg
                 gap_block = b
                 break
         if gap_block is not None:
             break
     if gap_block is None:
-        raise RuntimeError(f"Actual Octopus gap {current_q} not found")
+        raise RuntimeError(f"Octopus paragraph for {current_q} not found")
     bx0, by0, bx1, by1 = gap_block[:4]
-    # Locate this question number specifically inside the matched paragraph.
-    number_rects = [
-        r for r in found_page.search_for(str(current_q))
-        if r.y0 >= by0 - 2 and r.y1 <= by1 + 2
-    ]
-    if not number_rects:
-        raise RuntimeError(f"Printed Octopus gap number {current_q} not found in paragraph")
-    nr = number_rects[0]
-    box = (nr.x0, nr.y0, nr.x1, nr.y1)
     top = by0 - 7
     bottom = by1 + 7
-    im = crop_and_mask(found_page, top, bottom, box, 1.8, 7)
+
+    # Mask the renumbered PT1 gap number only if it can be identified inside
+    # this paragraph. Content must never be discarded just because the printed
+    # number is embedded in the text stream.
+    number_rects = [
+        r for r in found_page.search_for(str(current_q))
+        if r.y0 >= by0 - 3 and r.y1 <= by1 + 3 and r.width < 30
+    ]
+    if number_rects:
+        nr = number_rects[0]
+        im = crop_and_mask(found_page, top, bottom, (nr.x0, nr.y0, nr.x1, nr.y1), 1.8, 7)
+    else:
+        im = crop(found_page, top, bottom, 1.8, 7)
     assets[f"r_q_{old_q}"] = to_uri(im, 82)
 
 # ---------- Reading old Q21-30 = current PT1 Dreams Q29-38 ----------
