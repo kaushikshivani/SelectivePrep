@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install image/PDF dependencies
-        run: pip install pymupdf pillow
+        run: pip install pymupdf pillow numpy
 
       - name: Rebuild image assets
         run: python scripts/rebuild_2021_sample_vertical_only.py
