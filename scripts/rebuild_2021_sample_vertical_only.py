@@ -1,4 +1,4 @@
-import base64, io, json, urllib.request
+import base64, io, json, re, urllib.request
 from pathlib import Path
 
 import fitz
