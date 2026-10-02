@@ -134,6 +134,21 @@ def crop_and_mask(page, top, bottom, box, zoom=1.8, pad=10):
     ), fill="white")
     return vertical_trim(im, pad)
 
+def crop_and_masks(page, top, bottom, boxes, zoom=1.8, pad=10):
+    """Render full width and white out every stale printed number in the crop."""
+    top = max(0, top)
+    bottom = min(page.rect.height, bottom)
+    im = render(page, fitz.Rect(0, top, page.rect.width, bottom), zoom)
+    d = ImageDraw.Draw(im)
+    for x0, y0, x1, y1 in boxes:
+        d.rectangle((
+            max(0, int(x0 * zoom) - 8),
+            max(0, int((y0 - top) * zoom) - 8),
+            min(im.width, int(x1 * zoom) + 8),
+            min(im.height, int((y1 - top) * zoom) + 8),
+        ), fill="white")
+    return vertical_trim(im, pad)
+
 def exact_number_box(page, number, prefer_x_min=None):
     hits = []
     for w in page.get_text("words"):
@@ -245,8 +260,8 @@ for old_q, current_q in zip(range(15, 21), range(23, 29)):
         if r.y0 >= by0 - 3 and r.y1 <= by1 + 3 and r.width < 30
     ]
     if number_rects:
-        nr = number_rects[0]
-        im = crop_and_mask(found_page, top, bottom, (nr.x0, nr.y0, nr.x1, nr.y1), 1.8, 7)
+        boxes = [(r.x0, r.y0, r.x1, r.y1) for r in number_rects]
+        im = crop_and_masks(found_page, top, bottom, boxes, 1.8, 7)
     else:
         im = crop(found_page, top, bottom, 1.8, 7)
     assets[f"r_q_{old_q}"] = to_uri(im, 82)
