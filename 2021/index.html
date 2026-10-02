@@ -36,4 +36,52 @@ function showResult(id){stopTimer();active=null;let s=DATA[id],r=state[id].resul
 function reviewSubject(id){let r=state[id].result;if(r)renderReview([{id:id,qs:r.wrong}],'Incorrect questions - '+DATA[id].name)} function reviewAllWrong(){let groups=[];for(const id of Object.keys(DATA)){let r=state[id].result;if(r&&r.wrong.length)groups.push({id:id,qs:r.wrong})}if(!groups.length){alert('No saved incorrect questions yet.');return}renderReview(groups,'All incorrect questions')}
 function renderReview(groups,title){stopTimer();active=null;let html=`<div class="top"><div class="brand">${title}</div><button class="secondary" onclick="home()">Home</button></div><div class="wrap">`;for(const g of groups){let s=DATA[g.id],r=state[g.id].result;html+=`<h2>${s.name}</h2>`;for(const q of g.qs){let qd=s.questions[q],a=r.answers[q]||'Unanswered',c=s.key[q-1];let ctx=(qd.context||[]).length?`<details><summary>Show passage/context</summary><div class="context">${qd.context.map(x=>`<img src="${x}">`).join('')}</div></details>`:'';let note='';if(g.id==='reading'&&q>=15&&q<=20)note=`<div class="section-note">Gap ${q}</div>`;if(g.id==='reading'&&q>=21)note=`<div class="section-note">Extract matching question ${q}</div>`;html+=`<div class="review-item"><h3>Question ${q}</h3>${ctx}${note}${qd.image?`<img class="qimg" src="${qd.image}">`:''}<p>Your answer: <b class="wrong">${a}</b> &nbsp; Correct answer: <b class="correct">${c}</b></p>${state[g.id].flags[q]?'<p class="small">★ Flagged during the test.</p>':''}</div>`}}html+='</div>';document.getElementById('app').innerHTML=html;window.scrollTo(0,0)}
 window.addEventListener('beforeunload',save);home();
-</script></body></html>
+</script>
+<script>
+// Trim large blank PDF margins and isolated page-number/footer rows at display time.
+function trimDisplayedImage(img){
+  if(!img || img.dataset.trimmed==='1') return;
+  img.dataset.trimmed='1';
+  const run=()=>{
+    try{
+      const sw=img.naturalWidth, sh=img.naturalHeight;
+      if(!sw||!sh) return;
+      const scale=Math.min(1,900/sw);
+      const w=Math.max(1,Math.round(sw*scale)), h=Math.max(1,Math.round(sh*scale));
+      const scan=document.createElement('canvas'); scan.width=w; scan.height=h;
+      const sx=scan.getContext('2d',{willReadFrequently:true}); sx.drawImage(img,0,0,w,h);
+      const d=sx.getImageData(0,0,w,h).data;
+      const row=new Uint32Array(h), col=new Uint32Array(w);
+      for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+        const i=(y*w+x)*4; const lum=(d[i]*299+d[i+1]*587+d[i+2]*114)/1000;
+        if(lum<238){row[y]++; col[x]++;}
+      }
+      const rMin=Math.max(5,Math.floor(w*0.0025));
+      const cMin=Math.max(3,Math.floor(h*0.002));
+      const active=[]; for(let y=0;y<h;y++) if(row[y]>=rMin) active.push(y);
+      if(!active.length) return;
+      const runs=[]; let a=active[0], p=active[0];
+      for(let i=1;i<active.length;i++){const y=active[i]; if(y-p>10){runs.push([a,p]);a=y;} p=y;} runs.push([a,p]);
+      // Ignore a tiny isolated footer/page-number block after a large blank gap.
+      if(runs.length>1){
+        const last=runs[runs.length-1], prev=runs[runs.length-2];
+        const gap=last[0]-prev[1], lastH=last[1]-last[0]+1;
+        if(gap>Math.max(45,h*0.07) && lastH<Math.max(28,h*0.045)) runs.pop();
+      }
+      let top=Math.max(0,runs[0][0]-12), bottom=Math.min(h-1,runs[runs.length-1][1]+12);
+      let xs=[]; for(let x=0;x<w;x++) if(col[x]>=cMin) xs.push(x);
+      let left=0,right=w-1; if(xs.length){left=Math.max(0,xs[0]-12);right=Math.min(w-1,xs[xs.length-1]+12);}
+      const sf=1/scale; const sl=Math.floor(left*sf), st=Math.floor(top*sf), sr=Math.ceil((right+1)*sf), sb=Math.ceil((bottom+1)*sf);
+      if(sb-st>=sh*0.97 && sr-sl>=sw*0.97) return;
+      const out=document.createElement('canvas'); out.width=sr-sl; out.height=sb-st;
+      out.getContext('2d').drawImage(img,sl,st,out.width,out.height,0,0,out.width,out.height);
+      img.src=out.toDataURL('image/jpeg',0.9);
+    }catch(e){}
+  };
+  if(img.complete) run(); else img.addEventListener('load',run,{once:true});
+}
+function trimAllDisplayedImages(root=document){root.querySelectorAll?.('.qimg,.context img').forEach(trimDisplayedImage);}
+const trimObserver=new MutationObserver(ms=>{for(const m of ms) for(const n of m.addedNodes){if(n.nodeType===1){if(n.matches?.('.qimg,.context img'))trimDisplayedImage(n);trimAllDisplayedImages(n);}}});
+trimObserver.observe(document.documentElement,{childList:true,subtree:true});
+</script>
+</body></html>
