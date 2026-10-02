@@ -255,10 +255,18 @@ for old_q, current_q in zip(range(15, 21), range(23, 29)):
     # Mask the renumbered PT1 gap number only if it can be identified inside
     # this paragraph. Content must never be discarded just because the printed
     # number is embedded in the text stream.
-    number_rects = [
-        r for r in found_page.search_for(str(current_q))
-        if r.y0 >= by0 - 3 and r.y1 <= by1 + 3 and r.width < 30
-    ]
+    # Prefer the exact word object inside this matched paragraph. This avoids
+    # masking a section-heading occurrence of the same number.
+    number_rects = []
+    for w in found_page.get_text("words"):
+        wx0, wy0, wx1, wy1, wtext, *_ = w
+        if wtext == str(current_q) and wy0 >= by0 - 3 and wy1 <= by1 + 3:
+            number_rects.append(fitz.Rect(wx0, wy0, wx1, wy1))
+    if not number_rects:
+        number_rects = [
+            r for r in found_page.search_for(str(current_q))
+            if r.y0 >= by0 - 3 and r.y1 <= by1 + 3 and r.width < 30
+        ]
     if number_rects:
         boxes = [(r.x0, r.y0, r.x1, r.y1) for r in number_rects]
         im = crop_and_masks(found_page, top, bottom, boxes, 1.8, 7)
