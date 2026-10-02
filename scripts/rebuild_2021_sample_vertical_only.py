@@ -1,212 +1,273 @@
-import base64, io, json, re, urllib.request
+import base64, io, json, urllib.request
 from pathlib import Path
 
 import fitz
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "2021-sample"
 OUT.mkdir(exist_ok=True)
-
-URLS = {
-    "reading": "https://bettereducation.com.au/resources/download/nsw/SelectiveHighSchoolPlacement/sample%20tests/2021/reading-sample-test-questions.pdf",
-    "maths": "https://bettereducation.com.au/resources/download/nsw/SelectiveHighSchoolPlacement/sample%20tests/2021/maths-sample-test-questions.pdf",
-    "thinking": "https://bettereducation.com.au/resources/download/nsw/SelectiveHighSchoolPlacement/sample%20tests/2021/thinking-sample-test-questions.pdf",
-}
-
 TMP = ROOT / ".tmp_sample_pdfs"
 TMP.mkdir(exist_ok=True)
 
-def download(name):
-    path = TMP / f"{name}.pdf"
-    urllib.request.urlretrieve(URLS[name], path)
-    return fitz.open(path)
+# These official Practice Test 1 PDFs contain the same 2021 Sample maths/thinking
+# questions. The Reading PDF contains the same material plus one extra cloze
+# section, so below we explicitly map the matching question groups.
+URLS = {
+    "reading": "https://education.nsw.gov.au/content/dam/main-education/schooling/parents-and-carers/choosing-a-school-setting/selective-high-schools-and-opportunity-classes-parents/documents/shs-practice-tests-2026-entry/PT1_SHS_reading_questions.pdf",
+    "maths": "https://education.nsw.gov.au/content/dam/main-education/schooling/parents-and-carers/choosing-a-school-setting/selective-high-schools-and-opportunity-classes-parents/documents/shs-practice-tests-2026-entry/PT1_SHS_maths_questions_Final.pdf",
+    "thinking": "https://education.nsw.gov.au/content/dam/main-education/schooling/parents-and-carers/choosing-a-school-setting/selective-high-schools-and-opportunity-classes-parents/documents/shs-practice-tests-2026-entry/PT1_SHS_thinking_skills_questions.pdf",
+}
 
-def render(page, rect, zoom=1.7):
+def download(name):
+    p = TMP / f"{name}.pdf"
+    req = urllib.request.Request(URLS[name], headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req) as response, open(p, "wb") as out:
+        out.write(response.read())
+    return fitz.open(p)
+
+def render(page, rect, zoom=1.75):
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=rect, alpha=False)
     return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-def to_uri(image, quality=78):
-    buf = io.BytesIO()
-    image.convert("RGB").save(buf, "JPEG", quality=quality, optimize=True)
-    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+def to_uri(im, quality=80):
+    b = io.BytesIO()
+    im.convert("RGB").save(b, "JPEG", quality=quality, optimize=True)
+    return "data:image/jpeg;base64," + base64.b64encode(b.getvalue()).decode("ascii")
 
-def vertical_trim(image, pad=12):
-    """Trim only top/bottom whitespace. Never crop left/right."""
-    grey = np.array(image.convert("L"))
-    ink_per_row = (grey < 245).sum(axis=1)
-    rows = np.where(ink_per_row >= 3)[0]
-    if len(rows) == 0:
-        return image
+def vertical_trim(im, pad=14):
+    """Only top/bottom whitespace may be removed. Full horizontal width is preserved."""
+    a = np.array(im.convert("L"))
+    ink = (a < 246).sum(axis=1)
+    rows = np.where(ink >= 3)[0]
+    if not len(rows):
+        return im
     top = max(0, int(rows[0]) - pad)
-    bottom = min(image.height, int(rows[-1]) + pad + 1)
-    return image.crop((0, top, image.width, bottom))
+    bottom = min(im.height, int(rows[-1]) + pad + 1)
+    return im.crop((0, top, im.width, bottom))
 
-def sequential_markers(doc, start_q, end_q, x_limit=65):
-    """Find real question numbers in sequence, ignoring numbers inside options/diagrams."""
+def crop(page, top, bottom, zoom=1.75, pad=12):
+    top = max(0, top)
+    bottom = min(page.rect.height, bottom)
+    return vertical_trim(render(page, fitz.Rect(0, top, page.rect.width, bottom), zoom), pad)
+
+def markers(doc, start_q, end_q, x_limit=70):
+    """Question-number markers in strict sequence, avoiding numbers inside question text."""
     expected = start_q
-    markers = []
+    result = []
     for pno in range(doc.page_count):
         candidates = []
-        for word in doc[pno].get_text("words"):
-            x0, y0, x1, y1, text, *_ = word
-            if text.isdigit() and x0 < x_limit and y0 < 760:
+        for w in doc[pno].get_text("words"):
+            x0, y0, x1, y1, text, *_ = w
+            if text.isdigit() and x0 < x_limit and y0 < 770:
                 q = int(text)
                 if start_q <= q <= end_q:
-                    candidates.append((y0, x0, q, pno))
+                    candidates.append((y0, x0, q, pno, x0, y0, x1, y1))
         candidates.sort()
-        for y0, x0, q, pno in candidates:
+        for _, _, q, pno, x0, y0, x1, y1 in candidates:
             if q == expected:
-                markers.append((q, pno, y0))
+                result.append((q, pno, x0, y0, x1, y1))
                 expected += 1
                 if expected > end_q:
-                    return markers
-    raise RuntimeError(f"Could not find all questions {start_q}-{end_q}; stopped at {expected}")
+                    return result
+    raise RuntimeError(f"Stopped at Q{expected}; expected through Q{end_q}")
 
-def individual_question_images(doc, start_q, end_q, x_limit=65, zoom=1.7):
-    """
-    One image per question. A crop NEVER runs onto a later page.
-    If the next question starts on the same page, stop just above it.
-    Otherwise stop before the footer, then remove only vertical whitespace.
-    """
-    markers = sequential_markers(doc, start_q, end_q, x_limit)
-    result = {}
-    for i, (q, pno, y0) in enumerate(markers):
+def one_question_each(doc, start_q, end_q, x_limit=70, zoom=1.75):
+    """Exactly one question per image. Never append a following page/question."""
+    ms = markers(doc, start_q, end_q, x_limit)
+    out = {}
+    for i, m in enumerate(ms):
+        q, pno, x0, y0, x1, y1 = m
         page = doc[pno]
-        if i + 1 < len(markers) and markers[i + 1][1] == pno:
-            bottom = markers[i + 1][2] - 8
+        if i + 1 < len(ms) and ms[i + 1][1] == pno:
+            bottom = ms[i + 1][3] - 8
         else:
-            bottom = min(760, page.rect.height - 45)
-        top = max(0, y0 - 14)
-        image = render(page, fitz.Rect(0, top, page.rect.width, bottom), zoom)
-        result[q] = vertical_trim(image, 14)
-    return result
+            bottom = min(page.rect.height - 48, 775)
+        out[q] = crop(page, y0 - 15, bottom, zoom, 14)
+    return out
 
-def crop_vertical(page, top, bottom, zoom=1.55, pad=10):
-    return vertical_trim(render(page, fitz.Rect(0, top, page.rect.width, bottom), zoom), pad)
+def find_page(doc, phrase):
+    for pno in range(doc.page_count):
+        if phrase in doc[pno].get_text("text"):
+            return pno
+    raise RuntimeError(f"Could not find page containing: {phrase}")
+
+def find_word_number(page, number, x_min=None, x_max=None):
+    hits = []
+    for w in page.get_text("words"):
+        x0, y0, x1, y1, text, *_ = w
+        if text == str(number):
+            if x_min is not None and x0 < x_min:
+                continue
+            if x_max is not None and x0 > x_max:
+                continue
+            hits.append((x0, y0, x1, y1))
+    if not hits:
+        raise RuntimeError(f"Number {number} not found on page")
+    return hits
+
+def mask_rect_on_crop(im, page_rect, crop_top, zoom=1.75, extra=4):
+    """White out an obsolete printed question number; UI supplies the real number."""
+    x0, y0, x1, y1 = page_rect
+    d = ImageDraw.Draw(im)
+    px0 = max(0, int(x0 * zoom) - extra)
+    py0 = max(0, int((y0 - crop_top) * zoom) - extra)
+    px1 = min(im.width, int(x1 * zoom) + extra)
+    py1 = min(im.height, int((y1 - crop_top) * zoom) + extra)
+    d.rectangle((px0, py0, px1, py1), fill="white")
+    return im
 
 reading = download("reading")
 maths = download("maths")
 thinking = download("thinking")
-
 assets = {}
 
-# ---------- READING 1-8: two travel extracts, no questions inside the source ----------
-q1_y = sequential_markers(reading, 1, 14, 65)[0][2]
-assets["r_ctx_1"] = to_uri(crop_vertical(reading[2], 45, reading[2].rect.height - 45, 1.45, 10), 76)
-assets["r_ctx_2"] = to_uri(crop_vertical(reading[3], 30, q1_y - 18, 1.45, 10), 76)
+# ---------- Reading Q1-8: same numbering and same original extracts ----------
+r_ms = markers(reading, 1, 38, 70)
+r_by_q = {m[0]: m for m in r_ms}
+q1 = r_by_q[1]
+assets["r_ctx_1"] = to_uri(crop(reading[2], 35, reading[2].rect.height - 48, 1.5, 10), 78)
+assets["r_ctx_2"] = to_uri(crop(reading[3], 30, q1[3] - 18, 1.5, 10), 78)
+r_1_8 = one_question_each(reading, 1, 8, 70, 1.75)
+for q in range(1, 9):
+    assets[f"r_q_{q}"] = to_uri(r_1_8[q], 82)
 
-# ---------- READING 9-14: poem only ----------
-assets["r_ctx_3"] = to_uri(crop_vertical(reading[5], 45, reading[5].rect.height - 45, 1.45, 10), 76)
+# ---------- Reading old Q9-14 = current PT1 Q17-22 (same poem/questions) ----------
+poem_page = find_page(reading, "The Fish")
+assets["r_ctx_3"] = to_uri(crop(reading[poem_page], 45, reading[poem_page].rect.height - 48, 1.5, 10), 78)
 
-# ---------- READING 15-20: source text, continuation, and A-G candidate sentences ----------
-assets["r_ctx_4"] = to_uri(crop_vertical(reading[7], 55, reading[7].rect.height - 45, 1.45, 10), 76)
-assets["r_ctx_5"] = to_uri(crop_vertical(reading[8], 45, 190, 1.45, 10), 76)
+r_17_22 = one_question_each(reading, 17, 22, 70, 1.75)
+for old_q, current_q in zip(range(9, 15), range(17, 23)):
+    # Remove only the obsolete printed number; never crop horizontally.
+    m = r_by_q[current_q]
+    crop_top = m[3] - 15
+    im = r_17_22[current_q]
+    im = mask_rect_on_crop(im, (m[2], m[3], m[4], m[5]), crop_top, 1.75, 6)
+    assets[f"r_q_{old_q}"] = to_uri(im, 82)
 
-letters = []
-for word in reading[8].get_text("words"):
-    x0, y0, x1, y1, text, *_ = word
-    if text in list("ABCDEFG") and 120 < x0 < 150:
-        letters.append((text, y0))
-if len(letters) != 7:
-    raise RuntimeError(f"Expected A-G option rows, found {letters}")
-options_top = min(y for _, y in letters) - 14
-options_bottom = max(y for _, y in letters) + 38
-assets["r_options_15_20"] = to_uri(crop_vertical(reading[8], options_top, options_bottom, 1.65, 8), 78)
+# ---------- Reading old Q15-20 = current PT1 Octopus gaps Q23-28 ----------
+oct_start = find_page(reading, "Octopus farming")
+# The article spans this page and the following page. Keep the article and A-G choices,
+# but use focused per-gap images as the current question so there is no ambiguity.
+oct_pages = [oct_start, oct_start + 1]
+for idx, pno in enumerate(oct_pages, 1):
+    page = reading[pno]
+    # Keep content area, remove footer only.
+    assets[f"r_ctx_{3+idx}"] = to_uri(crop(page, 40, page.rect.height - 48, 1.5, 10), 78)
 
-# Individual gap line for each of 15-20, not a page containing several questions.
-for q, pno in [(15, 7), (16, 7), (17, 7), (18, 7), (19, 7), (20, 8)]:
-    matches = []
-    for block in reading[pno].get_text("blocks"):
-        x0, y0, x1, y1, text, *_ = block
-        if re.search(rf"\b{q}\s", text):
-            matches.append((y0, y1, text))
-    if not matches:
-        raise RuntimeError(f"Could not locate Reading Q{q}")
-    y0, y1, _ = matches[-1]
-    assets[f"r_q_{q}"] = to_uri(crop_vertical(reading[pno], y0 - 5, y1 + 5, 1.7, 4), 80)
+# A-G options are on second Octopus page; include them as one common source panel.
+p = reading[oct_start + 1]
+option_blocks = []
+for b in p.get_text("blocks"):
+    text = b[4]
+    if any(text.strip().startswith(letter) for letter in "ABCDEFG"):
+        option_blocks.append(b)
+if option_blocks:
+    options_top = min(b[1] for b in option_blocks) - 8
+    options_bottom = max(b[3] for b in option_blocks) + 8
+else:
+    options_top, options_bottom = 150, p.rect.height - 55
+assets["r_options_15_20"] = to_uri(crop(p, options_top, options_bottom, 1.65, 8), 80)
 
-# ---------- READING 21-30: extracts only + one prompt row per question ----------
-# Extract A begins after the 21-30 question list on page 10.
-extract_a_y = min(
-    b[1] for b in reading[9].get_text("blocks") if "Extract A" in b[4]
-)
-assets["r_ctx_6"] = to_uri(crop_vertical(reading[9], extract_a_y - 8, reading[9].rect.height - 45, 1.5, 10), 76)
+for old_q, current_q in zip(range(15, 21), range(23, 29)):
+    m = r_by_q[current_q]
+    page = reading[m[1]]
+    # A narrow vertical band around the relevant gap line, full width horizontally.
+    # It is intentionally independent from every other gap.
+    top = m[3] - 20
+    bottom = m[5] + 35
+    im = crop(page, top, bottom, 1.8, 7)
+    # Hide current PT1's renumbered gap marker; app heading says Q15..Q20.
+    im = mask_rect_on_crop(im, (m[2], m[3], m[4], m[5]), top, 1.8, 6)
+    assets[f"r_q_{old_q}"] = to_uri(im, 82)
 
-extract_b_y = min(
-    b[1] for b in reading[10].get_text("blocks") if "Extract B" in b[4]
-)
-assets["r_ctx_7"] = to_uri(crop_vertical(reading[10], extract_b_y - 8, reading[10].rect.height - 45, 1.5, 10), 76)
+# ---------- Reading old Q21-30 = current PT1 Dreams Q29-38 ----------
+dream_page = find_page(reading, "Read the four extracts below on the theme of dreams")
+page = reading[dream_page]
+# Source A starts after the prompt list.
+extract_a_blocks = [b for b in page.get_text("blocks") if "Extract A" in b[4]]
+if not extract_a_blocks:
+    raise RuntimeError("Extract A not found")
+extract_a_top = min(b[1] for b in extract_a_blocks) - 8
+assets["r_ctx_6"] = to_uri(crop(page, extract_a_top, page.rect.height - 48, 1.5, 10), 78)
 
-question_rows = []
-for word in reading[9].get_text("words"):
-    x0, y0, x1, y1, text, *_ = word
-    if text.isdigit() and 21 <= int(text) <= 30 and 430 < x0 < 480:
-        question_rows.append((int(text), y0))
-question_rows = sorted(set(question_rows))
-if [q for q, _ in question_rows] != list(range(21, 31)):
-    raise RuntimeError(f"Reading 21-30 row detection failed: {question_rows}")
-for i, (q, y0) in enumerate(question_rows):
-    next_y = question_rows[i + 1][1] if i + 1 < len(question_rows) else y0 + 38
-    assets[f"r_q_{q}"] = to_uri(crop_vertical(reading[9], y0 - 10, next_y - 4, 1.7, 6), 80)
+page2 = reading[dream_page + 1]
+assets["r_ctx_7"] = to_uri(crop(page2, 40, page2.rect.height - 48, 1.5, 10), 78)
 
-# Reading 1-14 exact question images.
-for q, image in individual_question_images(reading, 1, 14, 65, 1.7).items():
-    assets[f"r_q_{q}"] = to_uri(image, 80)
+# Prompt rows use the right-side printed numbers 29-38.
+prompt_hits = {}
+for w in page.get_text("words"):
+    x0, y0, x1, y1, text, *_ = w
+    if text.isdigit() and 29 <= int(text) <= 38 and x0 > 400:
+        prompt_hits[int(text)] = (x0, y0, x1, y1)
+if sorted(prompt_hits) != list(range(29, 39)):
+    raise RuntimeError(f"Dream prompt markers incorrect: {sorted(prompt_hits)}")
 
-# ---------- MATHS: reviewed question-by-question, one question per image ----------
-for q, image in individual_question_images(maths, 1, 35, 65, 1.7).items():
-    assets[f"m_q_{q}"] = to_uri(image, 80)
+ordered = [(q, prompt_hits[q]) for q in range(29, 39)]
+for i, (current_q, box) in enumerate(ordered):
+    old_q = 21 + i
+    y0 = box[1]
+    next_y = ordered[i + 1][1][1] if i + 1 < len(ordered) else y0 + 42
+    top = y0 - 11
+    bottom = next_y - 4
+    im = crop(page, top, bottom, 1.8, 6)
+    im = mask_rect_on_crop(im, box, top, 1.8, 6)
+    assets[f"r_q_{old_q}"] = to_uri(im, 82)
 
-# ---------- THINKING: reviewed question-by-question, one question per image ----------
-for q, image in individual_question_images(thinking, 1, 40, 65, 1.7).items():
-    assets[f"t_q_{q}"] = to_uri(image, 80)
+# ---------- Maths: 35 individually isolated questions ----------
+m_imgs = one_question_each(maths, 1, 35, 70, 1.75)
+for q in range(1, 36):
+    assets[f"m_q_{q}"] = to_uri(m_imgs[q], 82)
 
-expected_keys = (
+# ---------- Thinking: 40 individually isolated questions ----------
+t_imgs = one_question_each(thinking, 1, 40, 70, 1.75)
+for q in range(1, 41):
+    assets[f"t_q_{q}"] = to_uri(t_imgs[q], 82)
+
+# Strict completeness check: 105 individual questions plus Reading contexts/options.
+expected = (
     [f"r_ctx_{i}" for i in range(1, 8)]
     + ["r_options_15_20"]
     + [f"r_q_{i}" for i in range(1, 31)]
     + [f"m_q_{i}" for i in range(1, 36)]
     + [f"t_q_{i}" for i in range(1, 41)]
 )
-missing = [k for k in expected_keys if k not in assets]
-extra = [k for k in assets if k not in expected_keys]
+missing = [k for k in expected if k not in assets]
+extra = [k for k in assets if k not in expected]
 if missing or extra:
-    raise RuntimeError(f"Asset validation failed. Missing={missing}, extra={extra}")
+    raise RuntimeError(f"Asset check failed. Missing={missing}, extra={extra}")
 
-# Keep 11 JS asset files because index.html loads assets-01.js ... assets-11.js.
-items = [(k, assets[k]) for k in expected_keys]
+# Keep 11 asset JS files because index.html already loads these exact filenames.
+items = [(k, assets[k]) for k in expected]
 weights = [len(k) + len(v) + 8 for k, v in items]
+chunks = []
+pos = 0
 remaining_weight = sum(weights)
 remaining_chunks = 11
-position = 0
-chunks = []
-
 for _ in range(11):
     target = remaining_weight / remaining_chunks
     chunk = {}
     size = 0
-    while position < len(items):
-        key, value = items[position]
-        weight = weights[position]
-        remaining_items_after = len(items) - position - 1
-        chunks_after = remaining_chunks - 1
-        must_leave_one_each = remaining_items_after >= chunks_after
-        if chunk and size + weight > target and must_leave_one_each:
+    while pos < len(items):
+        k, v = items[pos]
+        w = weights[pos]
+        items_left = len(items) - pos - 1
+        chunks_left = remaining_chunks - 1
+        if chunk and size + w > target and items_left >= chunks_left:
             break
-        chunk[key] = value
-        size += weight
-        position += 1
+        chunk[k] = v
+        size += w
+        pos += 1
     chunks.append(chunk)
     remaining_weight -= size
     remaining_chunks -= 1
 
-if position != len(items) or len(chunks) != 11 or any(not chunk for chunk in chunks):
-    raise RuntimeError("Asset chunking failed")
+if pos != len(items) or any(not c for c in chunks):
+    raise RuntimeError("Chunking failed")
 
 for i, chunk in enumerate(chunks, 1):
     content = "window.ASSETS=window.ASSETS||{};Object.assign(window.ASSETS," + json.dumps(chunk, separators=(",", ":")) + ");\n"
     (OUT / f"assets-{i:02d}.js").write_text(content, encoding="utf-8")
 
-print("Rebuilt and individually validated all 105 questions for 2021 Sample.")
+print("Validated and rebuilt 105 individual question images: 30 Reading, 35 Maths, 40 Thinking.")
